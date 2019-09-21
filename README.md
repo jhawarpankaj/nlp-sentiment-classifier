@@ -1,2 +1,2 @@
 # nlp-tokenizer-classifier
-Language Classifier. 
+Sentiment Classifier. 
