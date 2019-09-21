@@ -1,2 +1,2 @@
-# nlp-tokenizer-classifier
+# nlp-sentiment-classifier
 Sentiment Classifier. 
