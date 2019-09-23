@@ -1,4 +1,3 @@
-import pprint
 import re
 import nltk
 import numpy
@@ -28,8 +27,11 @@ re_neg_start_tag = r"\bnot\b|\bno\b|\bnever\b|\bcannot\b|\b\w+n't\b"
 #  Set to stop negation tagging.
 neg_stop_tag = {"but", "however", "nevertheless", ".", "!", "?"}
 
-#  Initializing train and test vocabulary
-train_vocab, test_vocab = dict(), dict()
+#  Initializing train and test vocabulary.
+vocab = dict()
+
+# For storing the normalization scale on training data.
+min_max_list = []
 
 
 def load_corpus(corpus_path):
@@ -76,6 +78,11 @@ def tokenize(snippet):
 
 
 def tag_edits(tokenized_snippet):
+    """
+    Add EDIT_ tags for comments from editor.
+    :param tokenized_snippet: List of tuples(word, pos)
+    :return: List with EDIT_ added wherever applicable.
+    """
 
     #  Initializing helper variables.
     i, result = 0, []
@@ -122,7 +129,11 @@ def tag_edits(tokenized_snippet):
 
 
 def tag_negation(tokenized_snippet):
-
+    """
+    Add a tag NOT_ for probable negative sentiment words.
+    :param tokenized_snippet: List of tokens.
+    :return: List with NOT_ tag wherever applicable.
+    """
     #  Initializing helper variables.
     i, result = 0, []
     edit_, not_ = "EDIT_", "NOT_"
@@ -178,22 +189,28 @@ def tag_negation(tokenized_snippet):
 
 
 def get_features(preprocessed_snippet):
-
-    feature_vector = numpy.zeros(len(train_vocab), dtype=int)
+    """
+    Extract features from the preprocessed snippet.
+    :param preprocessed_snippet: List of tuples(word, pos).
+    :return: Feature Vector.
+    """
+    feature_vector = numpy.zeros(len(vocab), dtype=float)
 
     for word, pos in preprocessed_snippet:
-        if "EDIT_" in word or word not in train_vocab:
+        if "EDIT_" in word or word not in vocab:
             continue
-        # print(str(train_vocab))
-        # print(word)
-        index = train_vocab[word]
-        val = feature_vector[index]
-        feature_vector[index] = val + 1
+        index = vocab[word]
+        feature_vector[index] = feature_vector[index] + 1
 
     return feature_vector
 
 
-def build_train_vocab(corpus_path):
+def build_vocab(corpus_path):
+    """
+    Build the vocabulary from the dataset.
+    :param corpus_path: Path of the corpus on file system.
+    :return: Global variable vocab initialized with data.
+    """
     indices = 0
     list_snippet_label_tuple = load_corpus(corpus_path)
     for snippet, label in list_snippet_label_tuple:
@@ -202,31 +219,34 @@ def build_train_vocab(corpus_path):
         list_negation_pos_tuple = tag_negation(" ".join(list_edit_tags))
         # print(str(list_negation_pos_tuple))
         for word, pos in list_negation_pos_tuple:
-            if "EDIT_" in word:
-                continue
-            if word in train_vocab:
+            if "EDIT_" in word or word in vocab:
                 continue
             else:
-                train_vocab[word] = indices
+                vocab[word] = indices
                 indices = indices + 1
 
 
 def normalize(X):
+    """
+    Normalize the value for a trained/test dataset.
+    :param X: Numpy Array of size m X |V|
+    :return: Normalized numpy array.
+    """
     row, col = X.shape
-    i, min_max_list = 0, []
+    i = 0
 
     #  Get min, max for each column.
-    while i < col:
-        j, min, max = 0, 0, 0
-        while j < row:
-            if X[j, i] > max:
-                max = X[j, i]
-            if X[j, i] < min:
-                min = X[j, i]
-            j = j + 1
-        min_max_list.append((min, max))
-        i = i + 1
-
+    if not min_max_list:
+        while i < col:
+            j, min, max = 0, 0, 0
+            while j < row:
+                if X[j, i] > max:
+                    max = X[j, i]
+                if X[j, i] < min:
+                    min = X[j, i]
+                j = j + 1
+            min_max_list.append((min, max))
+            i = i + 1
     i, j = 0, 0
 
     #  Normalize the value of each elem in X_train.
@@ -246,6 +266,12 @@ def normalize(X):
 
 
 def evaluate_predictions(Y_pred, Y_true):
+    """
+    Metrics(precision, recall, f-measure) for a model.
+    :param Y_pred: Vector for predicted values of dataset.
+    :param Y_true: Atual class labels vector.
+    :return: Values for precision, recall, f-measure.
+    """
     i, tp, fp, fn = 0, 0, 0, 0
 
     while i < len(Y_pred):
@@ -265,6 +291,12 @@ def evaluate_predictions(Y_pred, Y_true):
 
 
 def top_features(logreg_model, k):
+    """
+    Returns the top K features for a logistic model.
+    :param logreg_model: Logistic Model.
+    :param k: No of top features.
+    :return: List of top k features with weights.
+    """
 
     np_array = logreg_model.coef_[0]
     i, updated_coef_ = 0, []
@@ -278,11 +310,167 @@ def top_features(logreg_model, k):
     topk_word_weight = []
 
     for index, weight in top_k:
-        for word, feature_position in train_vocab.items():
+        for word, feature_position in vocab.items():
             if index == feature_position:
                 topk_word_weight.append((word, weight))
 
     return topk_word_weight
+
+
+def load_dal(dal_path):
+    """
+    Loading the dal from the dal_path.
+    :param dal_path: Path of the file.
+    :return: Dictionary of weights.
+    """
+    result = dict()
+
+    with open(dal_path) as file:
+        next(file)
+        for line in file:
+            word, activation, evaluation, concreteness = line.rstrip("\n").split("\t")
+            result[word] = (activation, evaluation, concreteness)
+
+    return result
+
+
+def score_snippet(preprocessed_snippet, dal):
+    """
+    Returns the average score for a preprocessed snippet.
+    :param preprocessed_snippet: List of tuples.
+    :param dal: Dict built from dict_of_affect.txt
+    :return: Average value for a complete snippet.
+    """
+    activeness, pleasantness, imagery, count = 0, 0, 0, 0
+
+    for word, _ in preprocessed_snippet:
+
+        if "EDIT_" in word:
+            continue
+
+        if word in dal:
+            count = count + 1
+            activation, evaluation, concreteness = dal[word]
+        else:
+            activation, evaluation, concreteness = 0, 0, 0
+
+        if "NOT_" in word:
+            activation, evaluation, concreteness = -(float)(activation), -(float)(evaluation), -(float)(concreteness)
+
+        activeness += (float)(activation)
+        pleasantness += (float)(evaluation)
+        imagery += (float)(concreteness)
+
+    if count == 0:
+        return 0, 0, 0
+    else:
+        return activeness / count, pleasantness / count, imagery / count
+
+
+def modified_get_features(preprocessed_snippet, dal):
+    """
+    Instead of modifying the existing get_features, I have written this method
+    exclusively for part 4.
+    :param preprocessed_snippet: List of tuples.
+    :param dal: Dict build from dict_of_affect.txt
+    :return: Feature vectors along with the weights from the DAL.
+    """
+    V = len(vocab)
+    f1, f2, f3 = score_snippet(preprocessed_snippet, dal)
+    feature_vector = numpy.zeros(V + 3, dtype=float)
+
+    for word, _ in preprocessed_snippet:
+        if "EDIT_" in word or word not in vocab:
+            continue
+        index = vocab[word]
+        feature_vector[index] = feature_vector[index] + 1
+        feature_vector[V], feature_vector[V + 1], feature_vector[V + 2] = f1, f2, f3
+    #     print(feature_vector)
+
+    return feature_vector
+
+
+def part4():
+    """
+    I have put all the code related to part 4 here to make the main
+    method little less cumbersome.
+    :return: None
+    """
+    dal_path = "dict_of_affect.txt"
+    dal = load_dal(dal_path)
+
+    '''
+    Training the model.
+    '''
+    # Initialize vocabulary.
+    corpus_path = "train.txt"
+    build_vocab(corpus_path)
+
+    # Initialize X_train and Y_train arrays.
+    list_snippet_label_tuple_train = load_corpus(corpus_path)
+    m = len(list_snippet_label_tuple_train)
+    V = len(vocab)
+    X_train = numpy.empty([m, V + 3], dtype=float)
+    Y_train = numpy.empty(m, dtype=float)
+
+    # Build X_train and Y_train arrays.
+    i = 0
+    while i < len(list_snippet_label_tuple_train):
+        snippet, label = list_snippet_label_tuple_train[i]
+        list_quotes_separated = tokenize(snippet)
+        list_edit_tags = tag_edits(list_quotes_separated)
+        list_negation_pos_tuple = tag_negation(" ".join(list_edit_tags))
+        feature_vector = modified_get_features(list_negation_pos_tuple, dal)
+        X_train[i] = feature_vector
+        Y_train[i] = label
+        i = i + 1
+
+    # Normalizing the values for the trained model.
+    X_normalized_train = normalize(X_train)
+
+    '''
+    Testing the model.
+    '''
+    test_corpus = "test.txt"
+    list_snippet_label_tuple_test = load_corpus(test_corpus)
+
+    m = len(list_snippet_label_tuple_test)
+    X_test = numpy.empty([m, V + 3], dtype=float)
+    Y_true = numpy.empty(m, dtype=float)
+
+    #  Build X_test and Y_true arrays.
+    i = 0
+    while i < len(list_snippet_label_tuple_test):
+        snippet, label = list_snippet_label_tuple_test[i]
+        list_quotes_separated = tokenize(snippet)
+        list_edit_tags = tag_edits(list_quotes_separated)
+        list_negation_pos_tuple_test = tag_negation(" ".join(list_edit_tags))
+        feature_vector = modified_get_features(list_negation_pos_tuple_test, dal)
+        X_test[i] = feature_vector
+        Y_true[i] = label
+        i = i + 1
+
+    # Normalizing the values for the trained model.
+    X_test_normalized = normalize(X_test)
+    print("Testing Completed")
+
+    '''
+    Logistic Regression Model.
+    '''
+    lr_obj = LogisticRegression()
+    lr_obj.fit(X_normalized_train, Y_train)
+    Y_lr_pred = lr_obj.predict(X_test_normalized)
+
+    p, r, f = evaluate_predictions(Y_lr_pred, Y_true)
+    print("For Logistic: ")
+    print("Precision:" + str(p))
+    print("Recall:" + str(r))
+    print("F-measure:" + str(f))
+    '''
+    Top k features from the Logistic Regression.
+    '''
+    l = top_features(lr_obj, 10)
+    print(str(l))
 
 
 if __name__ == "__main__":
@@ -290,55 +478,55 @@ if __name__ == "__main__":
     '''
     Training the model.
     '''
-    #  Initialize train_vocabulary.
+    #  Initialize vocabulary.
     corpus_path = "train.txt"
-    build_train_vocab(corpus_path)
+    build_vocab(corpus_path)
 
     #  Initialize X_train and Y_train arrays.
-    list_snippet_label_tuple = load_corpus(corpus_path)
-    m = len(list_snippet_label_tuple)
-    V = len(train_vocab)
-    X_train = numpy.empty([m, V], dtype=int)
-    Y_train = numpy.empty(m, dtype=int)
+    list_snippet_label_tuple_train = load_corpus(corpus_path)
+    m = len(list_snippet_label_tuple_train)
+    V = len(vocab)
+    X_train = numpy.empty([m, V], dtype=float)
+    Y_train = numpy.empty(m, dtype=float)
 
     #  Build X_train and Y_train arrays.
     i = 0
-    while i < len(list_snippet_label_tuple):
-        snippet, label = list_snippet_label_tuple[i]
+    while i < len(list_snippet_label_tuple_train):
+        snippet, label = list_snippet_label_tuple_train[i]
         list_quotes_separated = tokenize(snippet)
         list_edit_tags = tag_edits(list_quotes_separated)
-        list_negation_pos_tuple = tag_negation(" ".join(list_edit_tags))
-        feature_vector = get_features(list_negation_pos_tuple)
+        list_negation_pos_tuple_train = tag_negation(" ".join(list_edit_tags))
+        feature_vector = get_features(list_negation_pos_tuple_train)
         X_train[i] = feature_vector
         Y_train[i] = label
         i = i + 1
 
     # Normalizing the values for the trained model.
-    X_normalized = normalize(X_train)
+    X_normalized_train = normalize(X_train)
 
     # Fitting the Gaussian Dist on normalized data.
     obj_nb = GaussianNB()
-    obj_nb.fit(X_normalized, Y_train)
+    obj_nb.fit(X_normalized_train, Y_train)
     print("Training Completed")
 
     '''
     Testing the model.
     '''
     test_corpus = "test.txt"
-    list_snippet_label_tuple = load_corpus(test_corpus)
+    list_snippet_label_tuple_test = load_corpus(test_corpus)
 
-    m = len(list_snippet_label_tuple)
-    X_test = numpy.empty([m, V], dtype=int)
-    Y_true = numpy.empty(m, dtype=int)
+    m = len(list_snippet_label_tuple_test)
+    X_test = numpy.empty([m, V], dtype=float)
+    Y_true = numpy.empty(m, dtype=float)
 
     #  Build X_test and Y_true arrays.
     i = 0
-    while i < len(list_snippet_label_tuple):
-        snippet, label = list_snippet_label_tuple[i]
+    while i < len(list_snippet_label_tuple_test):
+        snippet, label = list_snippet_label_tuple_test[i]
         list_quotes_separated = tokenize(snippet)
         list_edit_tags = tag_edits(list_quotes_separated)
-        list_negation_pos_tuple = tag_negation(" ".join(list_edit_tags))
-        feature_vector = get_features(list_negation_pos_tuple)
+        list_negation_pos_tuple_test = tag_negation(" ".join(list_edit_tags))
+        feature_vector = get_features(list_negation_pos_tuple_test)
         X_test[i] = feature_vector
         Y_true[i] = label
         i = i + 1
@@ -359,7 +547,7 @@ if __name__ == "__main__":
     Logistic Regression Model.
     '''
     lr_obj = LogisticRegression()
-    lr_obj.fit(X_normalized, Y_train)
+    lr_obj.fit(X_normalized_train, Y_train)
     Y_lr_pred = lr_obj.predict(X_test_normalized)
     p, r, f = evaluate_predictions(Y_lr_pred, Y_true)
     print("For Logistic: ")
@@ -373,21 +561,7 @@ if __name__ == "__main__":
     l = top_features(lr_obj, 10)
     print(str(l))
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    '''
+    Part 4
+    '''
+    part4()
